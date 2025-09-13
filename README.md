@@ -165,7 +165,7 @@ GRANT ALTER USER ON *.* TO ‘monitor_audit’@'localhost';
 FLUSH PRIVILEGES;
 ```
 
-Build
+### Main Build
 ```
 gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c -lmysqlclient -lpthread
 ```
