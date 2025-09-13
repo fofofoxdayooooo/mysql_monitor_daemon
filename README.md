@@ -98,6 +98,25 @@ Example: /root/mysql_search/passwd
 s3cr3tPassw0rd
 ```
 
+Create MySQL user
+```
+-- Create a dedicated monitoring user (host restricted to local only)
+CREATE USER ‘monitor_audit’@'localhost' IDENTIFIED BY ‘StrongPasswordHere’;
+
+-- Permissions to retrieve capacity information from information_schema
+GRANT SELECT ON `information_schema`.`tables` TO ‘monitor_audit’@'localhost';
+GRANT SELECT ON `information_schema`.`schema_privileges` TO ‘monitor_audit’@'localhost';
+
+-- Permissions required to LOCK/UNLOCK users
+GRANT ALTER USER ON *.* TO ‘monitor_audit’@'localhost';
+
+-- Do not grant other permissions to avoid unnecessary privileges
+-- (CREATE, DROP, SUPER, GRANT OPTION, etc. are prohibited)
+
+-- Refresh privileges
+FLUSH PRIVILEGES;
+```
+
 Build
 ```
 gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c -lmysqlclient -lpthread
