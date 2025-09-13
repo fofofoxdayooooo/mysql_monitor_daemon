@@ -89,7 +89,8 @@ Example: search.conf
 db_host=127.0.0.1
 db_user=root
 db_id=0
-monitor_interval_sec=3600
+monitor_interval_sec=600
+prometheus_truncate=1
 ```
 
 Example: /root/mysql_search/passwd
@@ -139,7 +140,18 @@ WantedBy=multi-user.target
 
 ### Run
 ```bash
-sudo ./mysql_monitor_daemon -d 2 -s 0 -t 1
+# Apply unit file changes
+sudo systemctl daemon-reexec
+sudo systemctl daemon-reload
+
+# Enable automatic startup
+sudo systemctl enable mysql_monitor.service
+
+# Start the service
+sudo systemctl start mysql_monitor.service
+
+# Check status
+sudo systemctl status mysql_monitor.service
 ```
 -d: debug level (0=log only, 2=lock)
 -s: shard number (0-based)
@@ -153,9 +165,4 @@ MIT
 
 abe_yamagami
 
-
-
-
-
-abe_yamagami
 a
