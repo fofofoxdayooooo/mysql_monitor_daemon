@@ -16,11 +16,17 @@ Designed for shared servers, internal DB clusters, and hosting environments wher
 - SIGHUP-triggered config reload (no restart needed)
 
 ## File Structure
-
+```
 /etc/mysql_search/
 ├── search.conf # DB connection and interval config
 ├── passwd # MySQL passwords (0600 perms required)
 └── search_user # User limits list: user,soft,hard
+```
+
+```
+/root/mysql_search/
+└── passwd # MySQL passwords (0600 perms required)
+```
 
 ## Metrics Output
 
@@ -71,18 +77,22 @@ On hard-limit: disables account with:
 ALTER USER 'user'@'%' ACCOUNT LOCK;
 ```
 
-Configuration
+### Configuration
 Example: search_user
+```
 user1,2GB,3GB
 user2,500MB
+```
 
 Example: search.conf
+```
 db_host=127.0.0.1
 db_user=root
 db_id=0
 monitor_interval_sec=3600
+```
 
-Example: /root/etc/mysql_monitor/passwd
+Example: /root/mysql_search/passwd
 ```
 s3cr3tPassw0rd
 ```
