@@ -50,11 +50,14 @@ mkdir -p /root/mysql_search
 touch /etc/mysql_search/search.conf
 touch /etc/mysql_search/search_user
 touch /root/mysql_search/passwd
+touch /etc/mysql_monitor/db_list
 
 # Force Permissions (Very Important)
 chmod 600 /etc/mysql_search/search.conf
 chmod 600 /root/mysql_search/passwd
 chmod 644 /etc/mysql_search/search_user
+chmod 640 /etc/mysql_monitor/db_list
+chown root:wheel /etc/mysql_monitor/db_list   # FreeBSD
 
 # Log file (OK to skip on first run)
 touch /var/log/mysql_monitor_audit.log
