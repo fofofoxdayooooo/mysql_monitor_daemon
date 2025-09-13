@@ -34,6 +34,28 @@ Supports:
 - `mysql_user_storage_soft_limit_bytes`
 - `mysql_user_storage_hard_limit_bytes`
 
+## Initial Setup
+```
+# Place executable binary
+install -m 755 mysql_monitor_daemon /usr/local/sbin/
+
+# Create directories
+mkdir -p /etc/mysql_search
+mkdir -p /root/mysql_search
+touch /etc/mysql_search/search.conf
+touch /etc/mysql_search/search_user
+touch /root/mysql_search/passwd
+
+# Force Permissions (Very Important)
+chmod 600 /etc/mysql_search/search.conf
+chmod 600 /root/mysql_search/passwd
+chmod 644 /etc/mysql_search/search_user
+
+# Log file (OK to skip on first run)
+touch /var/log/mysql_monitor_audit.log
+chmod 640 /var/log/mysql_monitor_audit.log
+```
+
 ## How It Works
 
 1. Reads DB list and user quota settings
