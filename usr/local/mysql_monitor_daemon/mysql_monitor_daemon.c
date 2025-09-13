@@ -42,7 +42,7 @@
 
 // Constant definitions
 #define CONF_FILE "/etc/mysql_search/search.conf"
-#define PASSWD_FILE "/etc/mysql_search/passwd"
+#define PASSWD_FILE "/root/mysql_search/passwd"
 #define USER_LIST_FILE "/etc/mysql_search/search_user"
 #define PROMETHEUS_METRICS_FILE "/var/run/mysql_monitor.prom"
 #define PROMETHEUS_METRICS_TMP_FILE "/var/run/mysql_monitor.prom.tmp"
