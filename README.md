@@ -200,10 +200,10 @@ ExecReload=/bin/kill -HUP $MAINPID
 ReadWritePaths=/var/run/mysql_monitor.prom
 Restart=on-failure
 RestartSec=5s
-```
 
 [Install]
 WantedBy=multi-user.target
+```
 
 ### Run
 ```bash
