@@ -70,6 +70,41 @@ Build
 gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c -lmysqlclient -lpthread
 ```
 
+### service
+/etc/systemd/system/mysql_monitor_daemon.service
+```
+[Unit]
+Description=MySQL Connection Monitor Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/mysql_monitor_daemon -s %i
+User=root
+Group=root
+
+# Security hardening settings
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_RESOURCE
+PrivateDevices=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallFilter=~@mount @swap @reboot @keyring @cpu-hotplug
+
+# Reload the daemon when SIGHUP is received
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Allow the daemon to write to the Prometheus metrics file
+ReadWritePaths=/var/run/mysql_monitor.prom
+Restart=on-failure
+RestartSec=5s
+```
+
+[Install]
+WantedBy=multi-user.target
+
 ### Run
 ```bash
 sudo ./mysql_monitor_daemon -d 2 -s 0 -t 1
@@ -85,3 +120,10 @@ MIT
 ### Author
 
 abe_yamagami
+
+
+
+
+
+abe_yamagami
+a
