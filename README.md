@@ -19,7 +19,6 @@ Designed for shared servers, internal DB clusters, and hosting environments wher
 ```
 /etc/mysql_search/
 ├── search.conf # DB connection and interval config
-├── passwd # MySQL passwords (0600 perms required)
 └── search_user # User limits list: user,soft,hard
 ```
 
