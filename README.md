@@ -98,7 +98,55 @@ Example: /root/mysql_search/passwd
 s3cr3tPassw0rd
 ```
 
+### Step 1: Build the Plugin
+```
+# Save the source code
+vi mysql_monitor_audit.c
+```
+
+Build (MySQL development headers required)
+```
+gcc -fPIC -Wall -I/usr/include/mysql -shared \
+    -o mysql_monitor_audit.so mysql_monitor_audit.c -lmysqlclient
+```
+※ libmysqlclient-dev (Debian/Ubuntu) or mysql-devel (RHEL/CentOS) package is required.
+
+### Step 2: Plugin Placement
+```
+# Verify MySQL's plugin directory
+mysql -u root -p -e “SHOW VARIABLES LIKE ‘plugin_dir’;”
+```
+
+Example: /usr/lib64/mysql/plugin/
+```
+cp mysql_monitor_audit.so /usr/lib64/mysql/plugin/
+chmod 644 /usr/lib64/mysql/plugin/mysql_monitor_audit.so
+```
+### Step 3: Create Dedicated User (Execute as root)
+```
+mysql -u root -p <<‘EOSQL’
+CREATE USER ‘monitor_audit’@'localhost' IDENTIFIED BY ‘StrongPasswordHere’;
+GRANT SELECT ON `information_schema`.`tables` TO ‘monitor_audit’@'localhost';
+GRANT SELECT ON `information_schema`.`schema_privileges` TO ‘monitor_audit’@'localhost';
+GRANT ALTER USER ON *.* TO ‘monitor_audit’@'localhost';
+FLUSH PRIVILEGES;
+EOSQL
+```
+
+### Step 4: Register the Plugin with MySQL
+```
+# Log in to MySQL
+mysql -u root -p
+
+# Register the plugin
+INSTALL PLUGIN mysql_monitor_audit SONAME ‘mysql_monitor_audit.so’;
+
+# Verify registration
+SHOW PLUGINS LIKE ‘mysql_monitor_audit’;
+
 Create MySQL user
+```
+
 ```
 -- Create a dedicated monitoring user (host restricted to local only)
 CREATE USER ‘monitor_audit’@'localhost' IDENTIFIED BY ‘StrongPasswordHere’;
