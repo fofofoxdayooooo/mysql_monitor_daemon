@@ -1,258 +1,136 @@
-# mysql_monitor_daemon
+# MySQL / MariaDB User Storage Monitor
 
-A powerful MySQL user storage monitoring daemon for Linux/FreeBSD environments.  
-Designed for shared servers, internal DB clusters, and hosting environments where **automatic control of user overuse is mission-critical**.
+A **MySQL / MariaDB monitoring solution** to prevent resource abuse in shared environments.  
+This project contains two main components:
+
+1. **Audit Plugin (`mysql_monitor_audit.c`)**  
+   - Hooks into MySQL/MariaDB via the Audit API.  
+   - Monitors `INSERT`, `UPDATE`, `LOAD`, and all DDL queries.  
+   - Checks user storage usage in real time and locks accounts exceeding hard limits.  
+   - Supports both MySQL (5.7 / 8.0) and MariaDB (10.3 / 10.4+).
+
+2. **Standalone Daemon (`mysql_monitor_daemon.c`)**  
+   - Runs as a background process on Linux / FreeBSD.  
+   - Periodically queries storage usage for each user.  
+   - Uses **LRU caching** for performance and writes **Prometheus metrics** for Grafana dashboards.  
+   - Supports **soft limits** (syslog warning) and **hard limits** (automatic account lock).  
+   - Compatible with both MySQL and MariaDB, including older versions.  
+   - Reloads configuration on **SIGHUP** without restart.
+
+---
 
 ## Features
 
-- Secure privilege drop (runs as root, drops to `mysql`)
-- Prometheus-compatible metrics output
-- LRU cache for 1,000+ user limits with eviction
-- Sharding support (e.g., 4-daemon horizontal scaling)
-- Soft / Hard user quota enforcement
-- Multi-threaded with task queue (configurable)
-- Efficient `information_schema` based usage scan
-- Clean `daemonize()` support
-- SIGHUP-triggered config reload (no restart needed)
+- Real-time and periodic monitoring
+- Per-user soft/hard limits
+- Automatic account locking (MySQL/MariaDB-aware)
+- Prometheus metrics exporter
+- Configurable via external files
+- Multi-threaded with task queue
+- Safe **atomic metrics writes**
+- Runs on **Linux and FreeBSD**
+---
 
-## File Structure
-```
-/etc/mysql_search/
-├── db_list
-├── search.conf
-└── user_limits # User limits list: user,soft,hard
-```
+## File Layout
 
-```
-/root/mysql_search/
-└── passwd # MySQL passwords (0600 perms required)
-```
-
-## Metrics Output
-
-Writes Prometheus metrics to:
-
-/var/run/mysql_monitor/mysql_monitor.prom
-
-
-Supports:
-- `mysql_user_storage_bytes`
-- `mysql_user_storage_soft_limit_bytes`
-- `mysql_user_storage_hard_limit_bytes`
-
-## Initial Setup
-```
-# Place executable binary
-install -m 755 mysql_monitor_daemon /usr/local/sbin/
-
-# Create directories
-mkdir -p /etc/mysql_monitor
-mkdir -p /root/mysql_monitor
-touch /etc/mysql_monitor/db_list
-touch /etc/mysql_monitor/user_limits
-touch /root/mysql_monitor/passwd
-touch /etc/mysql_monitor/config
-
-# Force Permissions (Very Important)
-chmod 600 /etc/mysql_monitor/search.conf
-chmod 600 /root/mysql_monitor/passwd
-chmod 644 /etc/mysql_monitor/user_limits
-chmod 640 /etc/mysql_monitor/db_list
-chown root:wheel /etc/mysql_monitor/db_list   # FreeBSD
-```
-
-## How It Works
-
-1. Reads DB list and user quota settings
-2. Connects to each DB and checks storage usage via:
- ```sql
-SELECT TABLE_SCHEMA, SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.tables GROUP BY TABLE_SCHEMA;
- ```
-
-3. If usage exceeds limits:
-Logs warning to syslog and audit log
-On hard-limit: disables account with:
 ```bash
-ALTER USER 'user'@'%' ACCOUNT LOCK;
+/etc/mysql_monitor/
+├── db_config # Daemon DB connection list
+├── user_limits # User limits definition
+├── config # Plugin config (hostname, port, socket)
+└── passwd # Password file (mode 600)
 ```
 
-### Configuration
-Example: db_list 
-```
-localhost, monitor, information_schema, 60, 0, 1
-192.168.1.100, monitor, user_db_prod, 300, 1, 1
-```
+## /var/run/mysql_monitor.prom # Prometheus metrics output
 
-Example: /root/etc/mysql_monitor/passwd
-```
-s3cr3tPassw0rd
-```
+## Example Configurations
 
-### Step 1: Build the Plugin
+### `/etc/mysql_monitor/db_config`
 ```
-# Save the source code
-vi mysql_monitor_audit.c
+hostname username password database port interval query_method
+
+127.0.0.1 monitor_user example_pass mysql 3306 60 information_schema
+192.168.1.10 monitor_user another_pass mysql 3306 120 sys_schema
 ```
 
-Build (MySQL development headers required)
+### `/etc/mysql_monitor/user_limits`
 ```
-gcc -o mysql_monitor_daemon mysql_monitor_daemon.c $(mysql_config --cflags) $(mysql_config --libs) -lrt
-gcc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c $(mysql_config --cflags) $(mysql_config --libs) -lpthread
-or
-gcc -fPIC -shared \
-    -o mysql_monitor_audit.so mysql_monitor_audit.c \
-    $(mariadb_config --cflags) \
-    $(mariadb_config --libs) \
-    -lpthread
+user_name soft_limit_bytes hard_limit_bytes
 
-cp mysql_monitor_audit.so $(mysql_config --plugindir)/
-
-and MariaDB for BSD
-cc -fPIC -shared \
-    -o mysql_monitor_audit.so mysql_monitor_audit.c \
-    $(mariadb_config --cflags) \
-    $(mariadb_config --libs) \
-    -pthread
-Linux
-gcc -fPIC -shared \
-    -o mysql_monitor_audit.so mysql_monitor_audit.c \
-    $(mariadb_config --cflags) \
-    $(mariadb_config --libs) \
-    -lpthread
-
-
+alice 1000000000 2000000000
+bob 5000000000 8000000000
+testuser 0 3000000000
 ```
 
-```BSD
-cc -o mysql_monitor_daemon mysql_monitor_daemon.c -I/usr/local/include/mysql -L/usr/local/lib/mysql -lmysqlclient -lutil -lpthread
-cc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c -I/usr/local/include/mysql -L/usr/local/lib/mysql -lmysqlclient -lpthread
-```
-※ libmysqlclient-dev (Debian/Ubuntu) or mysql-devel (RHEL/CentOS) package is required.
+### `/root/etc/mysql_monitor/passwd`
+example_pass
 
-### Step 2: Plugin Placement
-```
-# Verify MySQL's plugin directory
-mysql -u root -p -e “SHOW VARIABLES LIKE ‘plugin_dir’;”
-```
+---
 
-Example: /usr/lib64/mysql/plugin/
-```
-cp mysql_monitor_audit.so /usr/lib64/mysql/plugin/
-sudo chown mysql:mysql /usr/lib64/mysql/plugin/mysql_monitor_audit.so
-sudo chmod 444 /usr/lib64/mysql/plugin/mysql_monitor_audit.so
-```
-### Step 3: Create Dedicated User (Execute as root)
-```
-mysql -u root -p <<‘EOSQL’
-CREATE USER ‘monitor_audit’@'localhost' IDENTIFIED BY ‘StrongPasswordHere’;
-GRANT SELECT ON `information_schema`.`tables` TO ‘monitor_audit’@'localhost';
-GRANT SELECT ON `information_schema`.`schema_privileges` TO ‘monitor_audit’@'localhost';
-GRANT ALTER USER ON *.* TO ‘monitor_audit’@'localhost';
-FLUSH PRIVILEGES;
-EOSQL
+## Installation
+
+### Build Audit Plugin
+```bash
+gcc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c \
+    $(mysql_config --cflags) $(mysql_config --libs) -lpthread
 ```
 
-### Step 4: Register the Plugin with MySQL
-```
-# Log in to MySQL
-mysql -u root -p
-
-# Register the plugin
-INSTALL PLUGIN mysql_monitor_audit SONAME ‘mysql_monitor_audit.so’;
-
-# Verify registration
-SHOW PLUGINS LIKE ‘mysql_monitor_audit’;
-
-Create MySQL user
-
-vi my.cnf
-[mysqld]
-plugin-load-add=mysql_monitor_audit.so
+### Build Daemon
+```bash
+gcc -o mysql_monitor_daemon mysql_monitor_daemon.c \
+    $(mysql_config --cflags) $(mysql_config --libs) -lpthread
 ```
 
-```
--- Create a dedicated monitoring user (host restricted to local only)
-CREATE USER ‘monitor_audit’@'localhost' IDENTIFIED BY ‘StrongPasswordHere’;
-
--- Permissions to retrieve capacity information from information_schema
-GRANT SELECT ON `information_schema`.`tables` TO ‘monitor_audit’@'localhost';
-GRANT SELECT ON `information_schema`.`schema_privileges` TO ‘monitor_audit’@'localhost';
-
--- Permissions required to LOCK/UNLOCK users
-GRANT ALTER USER ON *.* TO ‘monitor_audit’@'localhost';
-
--- Do not grant other permissions to avoid unnecessary privileges
--- (CREATE, DROP, SUPER, GRANT OPTION, etc. are prohibited)
-
--- Refresh privileges
-FLUSH PRIVILEGES;
-```
-
-### Main Build
-```
-gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c -lmysqlclient -lpthread
-```
-
-### service
-/etc/systemd/system/mysql_monitor_daemon.service
+### Systemd Service Example
+/etc/systemd/system/mysql_monitor_daemon.service:
 ```
 [Unit]
-Description=MySQL Connection Monitor Daemon
+Description=MySQL User Storage Monitor Daemon
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/mysql_monitor_daemon -s %i
-User=root
-Group=root
-
-# Security hardening settings
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_RESOURCE
-PrivateDevices=true
-MemoryDenyWriteExecute=true
-RestrictRealtime=true
-SystemCallFilter=~@mount @swap @reboot @keyring @cpu-hotplug
-
-# Reload the daemon when SIGHUP is received
-ExecReload=/bin/kill -HUP $MAINPID
-
-# Allow the daemon to write to the Prometheus metrics file
-ReadWritePaths=/var/run/mysql_monitor.prom
-Restart=on-failure
-RestartSec=5s
+ExecStart=/usr/local/bin/mysql_monitor_daemon
+Restart=always
+User=mysqlmon
+Group=mysqlmon
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### Run
 ```bash
-# Apply unit file changes
-sudo systemctl daemon-reexec
-sudo systemctl daemon-reload
-
-# Enable automatic startup
-sudo systemctl enable mysql_monitor.service
-
-# Start the service
-sudo systemctl start mysql_monitor.service
-
-# Check status
-sudo systemctl status mysql_monitor.service
+systemctl enable mysql_monitor_daemon
+systemctl start mysql_monitor_daemon
 ```
--d: debug level (0=log only, 2=lock)
--s: shard number (0-based)
--t: total shards
 
+### Prometheus Integration
+Metrics are written to /var/run/mysql_monitor.prom in textfile format.
+Example output:
+```bash
+# HELP mysql_user_storage_usage_bytes Current storage usage for a user in bytes.
+# TYPE mysql_user_storage_usage_bytes gauge
+mysql_user_storage_usage_bytes{user="alice", limit_type="current"} 123456789
+mysql_user_storage_usage_bytes{user="alice", limit_type="soft"} 1000000000
+mysql_user_storage_usage_bytes{user="alice", limit_type="hard"} 2000000000
+```
+
+### Minimum Privileges for Monitor User
+```bash
+CREATE USER 'monitor_user'@'%' IDENTIFIED BY 'example_pass';
+GRANT SELECT ON `information_schema`.* TO 'monitor_user'@'%';
+GRANT SELECT ON `mysql`.* TO 'monitor_user'@'%';
+GRANT PROCESS ON *.* TO 'monitor_user'@'%';
+```
 ### License
 
-MIT
+MIT License
 
-### Author
+### Disclaimer
 
-abe_yamagami
+This software is intended for hosting providers, DBAs, and sysadmins
+to prevent resource abuse in shared MySQL/MariaDB environments.
+Use with caution in production and always test in staging first.
 
-a
+
+## File Layout
+
