@@ -32,6 +32,9 @@
  * - NEW: Implemented size limit for the LRU cache.
  * - NEW: Improved MariaDB < 10.4 lock logic.
  * - NEW: Refactored DB connection info to include password per entry.
+ * - NEW: Graceful shutdown of worker threads.
+ * - NEW: Implemented PID file creation and locking.
+ * - NEW: Added sys/file.h for flock() and OS-specific PID file handling.
  */
 
 #include <stdio.h>
@@ -48,6 +51,12 @@
 #include <stdbool.h>
 #include <sys/select.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h> // Required for flock()
+
+#ifdef __FreeBSD__
+#include <libutil.h>
+#endif
 
 #define MAX_THREADS 8
 #define MAX_DB_INFO 32
@@ -55,6 +64,7 @@
 #define MAX_DB_CONN_RETRIES 5
 #define MAX_LRU_CACHE_SIZE 1024
 #define METRICS_FILE_PATH "/var/run/mysql_monitor.prom"
+#define PID_FILE_PATH "/var/run/mysql_monitor.pid"
 
 // Configuration file paths
 #define DB_CONFIG_FILE "/etc/mysql_monitor/db_config"
@@ -71,6 +81,13 @@ static volatile sig_atomic_t keep_running = 1;
 static volatile sig_atomic_t reload_config = 0;
 static WorkerMode worker_mode = MODE_THREAD_POOL;
 static int debug_level = 1; // 0: off, 1: info, 2: verbose
+
+#ifdef __FreeBSD__
+static struct pidfh *pfh = NULL;
+#else
+static int pid_file_fd = -1;
+#endif
+
 
 // SQL Query method
 typedef enum {
@@ -156,8 +173,17 @@ void check_user_usage_and_lock(const DBConnectionInfo *db_info, const char *user
 DBType get_db_version_type(MYSQL *conn);
 void init_lru_cache();
 void update_lru_cache(const char *user, long long usage, long long soft_limit, long long hard_limit);
-long long get_lru_cache(const char *user);
 void trim_lru_cache();
+bool get_lru_cache(const char *user, long long *usage);
+
+// OS-specific PID file functions
+#ifdef __FreeBSD__
+int create_pid_file();
+void remove_pid_file();
+#else
+int create_pid_file();
+void remove_pid_file();
+#endif
 
 // --- Main Daemon Logic ---
 int main(int argc, char *argv[]) {
@@ -188,6 +214,13 @@ int main(int argc, char *argv[]) {
     openlog("mysql_monitor_daemon", LOG_PID | LOG_CONS, LOG_DAEMON);
     syslog(LOG_INFO, "MySQL monitor daemon starting...");
 
+    // Create PID file
+    if (create_pid_file() != 0) {
+        syslog(LOG_ERR, "Failed to create PID file. Another instance might be running.");
+        closelog();
+        exit(EXIT_FAILURE);
+    }
+    
     // Register signal handlers
     signal(SIGHUP, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -199,6 +232,7 @@ int main(int argc, char *argv[]) {
     // Initial configuration load
     if (read_db_config() != 0 || read_user_limits() != 0) {
         syslog(LOG_ERR, "Failed to load initial configuration. Exiting.");
+        remove_pid_file();
         exit(EXIT_FAILURE);
     }
 
@@ -206,6 +240,12 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < MAX_THREADS; i++) {
         if (pthread_create(&worker_threads[i], NULL, worker_function, NULL) != 0) {
             syslog(LOG_ERR, "Failed to create worker thread %d.", i);
+            keep_running = 0;
+            pthread_cond_broadcast(&queue_cond);
+            for (int j = 0; j < i; j++) {
+                pthread_join(worker_threads[j], NULL);
+            }
+            remove_pid_file();
             exit(EXIT_FAILURE);
         }
     }
@@ -249,9 +289,6 @@ int main(int argc, char *argv[]) {
         write_prometheus_metrics();
 
         // Use pselect for a responsive main loop
-        // Note: For a more robust design in multi-threaded environments,
-        // a dedicated signal handling thread using sigwait() is a more standard approach.
-        // This simple pselect implementation is sufficient for this daemon's needs.
         sigset_t sigmask, oldmask;
         sigemptyset(&sigmask);
         sigaddset(&sigmask, SIGHUP);
@@ -267,7 +304,6 @@ int main(int argc, char *argv[]) {
         pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
         if (ret == -1 && errno != EINTR) {
             syslog(LOG_ERR, "pselect failed: %s", strerror(errno));
-            sleep(1);
         }
     }
 
@@ -282,14 +318,7 @@ int main(int argc, char *argv[]) {
         pthread_join(worker_threads[i], NULL);
     }
     
-    // Clean up remaining tasks in the queue
-    Task *current = task_queue;
-    while (current) {
-        Task *temp = current;
-        current = current->next;
-        free(temp);
-    }
-
+    remove_pid_file();
     closelog();
     exit(EXIT_SUCCESS);
 }
@@ -302,7 +331,17 @@ void *worker_function(void *arg) {
         while (task_queue == NULL && keep_running) {
             pthread_cond_wait(&queue_cond, &queue_mutex);
         }
+        
+        // Fast exit on shutdown signal
         if (!keep_running) {
+            // Free any tasks still in the queue for this thread's exit
+            Task *current = task_queue;
+            while (current) {
+                Task *temp = current;
+                current = current->next;
+                free(temp);
+            }
+            task_queue = NULL; // Clear queue for this thread's final check
             pthread_mutex_unlock(&queue_mutex);
             break;
         }
@@ -599,20 +638,88 @@ void trim_lru_cache() {
     }
 }
 
-long long get_lru_cache(const char *user) {
+// Function to safely get usage from cache
+bool get_lru_cache(const char *user, long long *usage) {
     pthread_mutex_lock(&user_cache.mutex);
     UserCacheNode *node = user_cache.head;
     while (node != NULL) {
         if (strcmp(node->user, user) == 0) {
-            long long usage = node->usage;
+            *usage = node->usage;
             pthread_mutex_unlock(&user_cache.mutex);
-            return usage;
+            return true;
         }
         node = node->next;
     }
     pthread_mutex_unlock(&user_cache.mutex);
-    return -1; // Not found
+    return false; // Not found
 }
+
+
+// --- PID File Handling (OS-specific) ---
+#ifdef __FreeBSD__
+int create_pid_file() {
+    pfh = pidfile_open(PID_FILE_PATH, 0600, NULL);
+    if (pfh == NULL) {
+        if (errno == EEXIST) {
+            syslog(LOG_ERR, "Daemon already running.");
+            return -1;
+        }
+        syslog(LOG_ERR, "Failed to create PID file: %s", strerror(errno));
+        return -1;
+    }
+    pidfile_write(pfh);
+    return 0;
+}
+
+void remove_pid_file() {
+    if (pfh != NULL) {
+        pidfile_remove(pfh);
+    }
+}
+
+#else // Linux / Generic
+int create_pid_file() {
+    char pid_str[16];
+    int len;
+
+    pid_file_fd = open(PID_FILE_PATH, O_RDWR | O_CREAT, 0644);
+    if (pid_file_fd < 0) {
+        syslog(LOG_ERR, "Failed to open PID file: %s", PID_FILE_PATH);
+        return -1;
+    }
+
+    if (flock(pid_file_fd, LOCK_EX | LOCK_NB) != 0) {
+        syslog(LOG_ERR, "Failed to lock PID file. Another instance is running?");
+        close(pid_file_fd);
+        pid_file_fd = -1;
+        return -1;
+    }
+
+    if (ftruncate(pid_file_fd, 0) != 0) {
+        syslog(LOG_ERR, "Failed to truncate PID file.");
+        close(pid_file_fd);
+        pid_file_fd = -1;
+        return -1;
+    }
+
+    len = snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
+    if (write(pid_file_fd, pid_str, len) != len) {
+        syslog(LOG_ERR, "Failed to write PID to file.");
+        close(pid_file_fd);
+        pid_file_fd = -1;
+        return -1;
+    }
+    return 0;
+}
+
+void remove_pid_file() {
+    if (pid_file_fd != -1) {
+        flock(pid_file_fd, LOCK_UN);
+        close(pid_file_fd);
+        unlink(PID_FILE_PATH);
+    }
+}
+#endif
 
 
 // --- Prometheus Metrics ---
