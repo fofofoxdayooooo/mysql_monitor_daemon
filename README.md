@@ -18,8 +18,8 @@ Designed for shared servers, internal DB clusters, and hosting environments wher
 ## File Structure
 ```
 /etc/mysql_search/
-├── search.conf # DB connection and interval config
-└── search_user # User limits list: user,soft,hard
+├── db_list
+└── user_limits # User limits list: user,soft,hard
 ```
 
 ```
@@ -31,7 +31,7 @@ Designed for shared servers, internal DB clusters, and hosting environments wher
 
 Writes Prometheus metrics to:
 
-/var/run/mysql_monitor.prom
+/var/run/mysql_monitor/mysql_monitor.prom
 
 
 Supports:
@@ -45,23 +45,19 @@ Supports:
 install -m 755 mysql_monitor_daemon /usr/local/sbin/
 
 # Create directories
-mkdir -p /etc/mysql_search
-mkdir -p /root/mysql_search
-touch /etc/mysql_search/search.conf
-touch /etc/mysql_search/search_user
-touch /root/mysql_search/passwd
+mkdir -p /etc/mysql_monitor
+mkdir -p /root/mysql_monitor
 touch /etc/mysql_monitor/db_list
+touch /etc/mysql_monitor/user_limits
+touch /root/mysql_monitor/passwd
+touch /etc/mysql_monitor/config
 
 # Force Permissions (Very Important)
-chmod 600 /etc/mysql_search/search.conf
-chmod 600 /root/mysql_search/passwd
-chmod 644 /etc/mysql_search/search_user
+chmod 600 /etc/mysql_monitor/search.conf
+chmod 600 /root/mysql_monitor/passwd
+chmod 644 /etc/mysql_monitor/search_user
 chmod 640 /etc/mysql_monitor/db_list
 chown root:wheel /etc/mysql_monitor/db_list   # FreeBSD
-
-# Log file (OK to skip on first run)
-touch /var/log/mysql_monitor_audit.log
-chmod 640 /var/log/mysql_monitor_audit.log
 ```
 
 ## How It Works
@@ -80,22 +76,13 @@ ALTER USER 'user'@'%' ACCOUNT LOCK;
 ```
 
 ### Configuration
-Example: search_user
+Example: db_list 
 ```
-user1,2GB,3GB
-user2,500MB
-```
-
-Example: search.conf
-```
-db_host=127.0.0.1
-db_user=root
-db_id=0
-monitor_interval_sec=600
-prometheus_truncate=1
+localhost, monitor, information_schema, 60, 0, 1
+192.168.1.100, monitor, user_db_prod, 300, 1, 1
 ```
 
-Example: /root/mysql_search/passwd
+Example: /root/etc/mysql_monitor/passwd
 ```
 s3cr3tPassw0rd
 ```
@@ -108,8 +95,13 @@ vi mysql_monitor_audit.c
 
 Build (MySQL development headers required)
 ```
-gcc -fPIC -Wall -I/usr/include/mysql -shared \
-    -o mysql_monitor_audit.so mysql_monitor_audit.c -lmysqlclient
+gcc -o mysql_monitor_daemon mysql_monitor_daemon.c $(mysql_config --cflags) $(mysql_config --libs) -lrt
+gcc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c $(mysql_config --cflags) $(mysql_config --libs) -lpthread
+```
+
+```BSD
+cc -o mysql_monitor_daemon mysql_monitor_daemon.c -I/usr/local/include/mysql -L/usr/local/lib/mysql -lmysqlclient -lutil -lpthread
+cc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c -I/usr/local/include/mysql -L/usr/local/lib/mysql -lmysqlclient -lpthread
 ```
 ※ libmysqlclient-dev (Debian/Ubuntu) or mysql-devel (RHEL/CentOS) package is required.
 
@@ -122,7 +114,8 @@ mysql -u root -p -e “SHOW VARIABLES LIKE ‘plugin_dir’;”
 Example: /usr/lib64/mysql/plugin/
 ```
 cp mysql_monitor_audit.so /usr/lib64/mysql/plugin/
-chmod 644 /usr/lib64/mysql/plugin/mysql_monitor_audit.so
+sudo chown mysql:mysql /usr/lib64/mysql/plugin/mysql_monitor_audit.so
+sudo chmod 444 /usr/lib64/mysql/plugin/mysql_monitor_audit.so
 ```
 ### Step 3: Create Dedicated User (Execute as root)
 ```
