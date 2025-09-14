@@ -6,8 +6,9 @@
  * - MariaDB 10.3 and 10.4+ supported (different LOCK mechanism)
  * - Hooks INSERT/UPDATE/LOAD (GENERAL) and ALL DDL commands
  * - Soft/Hard limit control
- * - Reads user limits from /etc/mysql_search/search_user
+ * - Reads user limits from /etc/mysql_monitor/user_limits
  * - Reads DB credentials from /root/etc/mysql_monitor/passwd
+ * - Reads DB connection info (hostname/port/socket) from /etc/mysql_monitor/config
  */
 
 #include <mysql/plugin.h>
@@ -19,8 +20,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <errno.h>
 
 #define MAX_USERS 1024
+#define PASSWD_FILE "/root/etc/mysql_monitor/passwd"
+#define USER_LIMITS_FILE "/etc/mysql_monitor/user_limits"
+#define CONFIG_FILE "/etc/mysql_monitor/config"
 
 typedef struct {
     char user[64];
@@ -33,232 +38,240 @@ static int limit_count = 0;
 static pthread_mutex_t limits_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // DB connection info
+static char g_db_hostname[256] = "localhost";
+static unsigned int g_db_port = 3306;       // default MySQL port
+static char g_db_socket[256] = "";          // optional socket
 static char g_db_user[64] = "monitor_audit";
-static char g_db_pass[128] = "";
+static char g_db_password[128] = "";
 
-// A simple connection pool
-#define POOL_SIZE 4
-static MYSQL* g_connections[POOL_SIZE] = {NULL};
-static pthread_mutex_t g_conn_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Function prototypes
+static int read_db_pass();
+static int read_user_limits();
+static int read_config();
+static long long check_user_storage(const char *user);
+static void *check_user_usage_worker(void *arg);
+static void lock_user_account(const char *user);
+static int audit_notify(MYSQL_AUDIT_INFO *audit_info, unsigned int event_class, const void *event);
 
-// Function to get a connection from the pool
-static MYSQL* get_connection() {
-    pthread_mutex_lock(&g_conn_mutex);
-    for (int i = 0; i < POOL_SIZE; i++) {
-        if (g_connections[i] != NULL) {
-            MYSQL* conn = g_connections[i];
-            g_connections[i] = NULL;
-            pthread_mutex_unlock(&g_conn_mutex);
-            return conn;
+static int read_config() {
+    FILE *fp = fopen(CONFIG_FILE, "r");
+    if (!fp) {
+        syslog(LOG_WARNING, "Failed to open config file %s: %s. Using defaults.", CONFIG_FILE, strerror(errno));
+        return -1;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '#' || line[0] == '\n')
+            continue;
+
+        char key[128], value[384];
+        if (sscanf(line, "%127[^=]=%383s", key, value) == 2) {
+            if (strcmp(key, "hostname") == 0) {
+                strncpy(g_db_hostname, value, sizeof(g_db_hostname) - 1);
+                g_db_hostname[sizeof(g_db_hostname) - 1] = '\0';
+                syslog(LOG_INFO, "Configured DB hostname: %s", g_db_hostname);
+            } else if (strcmp(key, "port") == 0) {
+                g_db_port = (unsigned int)atoi(value);
+                syslog(LOG_INFO, "Configured DB port: %u", g_db_port);
+            } else if (strcmp(key, "socket") == 0) {
+                strncpy(g_db_socket, value, sizeof(g_db_socket) - 1);
+                g_db_socket[sizeof(g_db_socket) - 1] = '\0';
+                syslog(LOG_INFO, "Configured DB socket: %s", g_db_socket);
+            } else {
+                syslog(LOG_WARNING, "Unknown config key in %s: %s", CONFIG_FILE, key);
+            }
         }
     }
-    pthread_mutex_unlock(&g_conn_mutex);
 
-    // If pool is empty, create a new connection
-    MYSQL *conn = mysql_init(NULL);
-    if (!conn) {
-        syslog(LOG_ERR, "[AuditPlugin] Failed to initialize MySQL connection.");
-        return NULL;
-    }
-    if (!mysql_real_connect(conn, "localhost", g_db_user, g_db_pass, NULL, 0, NULL, 0)) {
-        syslog(LOG_ERR, "[AuditPlugin] Failed to connect to MySQL: %s", mysql_error(conn));
-        mysql_close(conn);
-        return NULL;
-    }
-    return conn;
+    fclose(fp);
+    return 0;
 }
 
-// Function to return a connection to the pool
-static void release_connection(MYSQL* conn) {
-    if (!conn) return;
-    pthread_mutex_lock(&g_conn_mutex);
-    for (int i = 0; i < POOL_SIZE; i++) {
-        if (g_connections[i] == NULL) {
-            g_connections[i] = conn;
-            pthread_mutex_unlock(&g_conn_mutex);
-            return;
+static int read_db_pass() {
+    FILE *fp = fopen(PASSWD_FILE, "r");
+    if (!fp) {
+        syslog(LOG_ERR, "Failed to open password file %s: %s", PASSWD_FILE, strerror(errno));
+        return -1;
+    }
+    if (fgets(g_db_password, sizeof(g_db_password), fp) == NULL) {
+        syslog(LOG_ERR, "Failed to read password from file %s", PASSWD_FILE);
+        fclose(fp);
+        return -1;
+    }
+    g_db_password[strcspn(g_db_password, "\n")] = 0; // remove trailing newline
+    fclose(fp);
+    return 0;
+}
+
+static int read_user_limits() {
+    FILE *fp = fopen(USER_LIMITS_FILE, "r");
+    if (!fp) {
+        syslog(LOG_ERR, "Failed to open user limits file %s: %s", USER_LIMITS_FILE, strerror(errno));
+        return -1;
+    }
+
+    pthread_mutex_lock(&limits_mutex);
+    limit_count = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && limit_count < MAX_USERS) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (sscanf(line, "%63[^,],%lld,%lld", limits[limit_count].user,
+                   &limits[limit_count].soft_limit, &limits[limit_count].hard_limit) == 3) {
+            limit_count++;
         }
     }
-    // Pool is full, close the connection
-    pthread_mutex_unlock(&g_conn_mutex);
+    pthread_mutex_unlock(&limits_mutex);
+
+    fclose(fp);
+    return 0;
+}
+
+static long long check_user_storage(const char *user) {
+    MYSQL *conn = mysql_init(NULL);
+    if (!conn) {
+        syslog(LOG_ERR, "mysql_init() failed in check_user_storage");
+        return -1;
+    }
+
+    if (!mysql_real_connect(conn, g_db_hostname, g_db_user, g_db_password,
+                            NULL, g_db_port,
+                            (strlen(g_db_socket) > 0 ? g_db_socket : NULL), 0)) {
+        syslog(LOG_ERR, "Failed to connect to database: %s", mysql_error(conn));
+        mysql_close(conn);
+        return -1;
+    }
+
+    char query[256];
+    char escaped_user[64 * 2 + 1];
+    mysql_real_escape_string(conn, escaped_user, user, strlen(user));
+    snprintf(query, sizeof(query),
+             "SELECT SUM(data_length + index_length) "
+             "FROM information_schema.tables WHERE table_schema = '%s'",
+             escaped_user);
+
+    if (mysql_query(conn, query)) {
+        syslog(LOG_ERR, "Query failed: %s", mysql_error(conn));
+        mysql_close(conn);
+        return -1;
+    }
+
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (res == NULL) {
+        syslog(LOG_ERR, "mysql_store_result() failed: %s", mysql_error(conn));
+        mysql_close(conn);
+        return -1;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    long long usage = -1;
+    if (row && row[0]) {
+        usage = atoll(row[0]);
+    }
+
+    mysql_free_result(res);
+    mysql_close(conn);
+    return usage;
+}
+
+static void *check_user_usage_worker(void *arg) {
+    char *user = (char *)arg;
+    syslog(LOG_INFO, "Checking user usage for: %s", user);
+
+    pthread_mutex_lock(&limits_mutex);
+    bool found_limit = false;
+    long long soft_limit = 0;
+    long long hard_limit = 0;
+    for (int i = 0; i < limit_count; i++) {
+        if (strcmp(limits[i].user, user) == 0) {
+            soft_limit = limits[i].soft_limit;
+            hard_limit = limits[i].hard_limit;
+            found_limit = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&limits_mutex);
+
+    if (!found_limit) {
+        syslog(LOG_WARNING, "No limit found for user: %s. Exiting worker.", user);
+        free(user);
+        return NULL;
+    }
+
+    long long current_usage = check_user_storage(user);
+    if (current_usage == -1) {
+        syslog(LOG_ERR, "Failed to get user usage for %s. Exiting worker.", user);
+        free(user);
+        return NULL;
+    }
+
+    if (current_usage > hard_limit) {
+        syslog(LOG_ALERT, "User %s exceeded hard limit. Locking account.", user);
+        lock_user_account(user);
+    } else if (current_usage > soft_limit) {
+        syslog(LOG_NOTICE, "User %s exceeded soft limit. Usage: %lld bytes.", user, current_usage);
+    }
+
+    free(user);
+    return NULL;
+}
+
+static void lock_user_account(const char *user) {
+    MYSQL *conn = mysql_init(NULL);
+    if (!conn) {
+        syslog(LOG_ERR, "mysql_init() failed in lock_user_account");
+        return;
+    }
+
+    if (!mysql_real_connect(conn, g_db_hostname, g_db_user, g_db_password,
+                            NULL, g_db_port,
+                            (strlen(g_db_socket) > 0 ? g_db_socket : NULL), 0)) {
+        syslog(LOG_ERR, "Failed to connect to lock account for %s: %s", user, mysql_error(conn));
+        mysql_close(conn);
+        return;
+    }
+
+    char query[256];
+    char escaped_user[64 * 2 + 1];
+    mysql_real_escape_string(conn, escaped_user, user, strlen(user));
+    snprintf(query, sizeof(query), "ALTER USER '%s'@'%%' ACCOUNT LOCK;", escaped_user);
+
+    if (mysql_real_query(conn, query, strlen(query))) {
+        syslog(LOG_ERR, "Failed to lock account for %s: %s", user, mysql_error(conn));
+    } else {
+        syslog(LOG_ALERT, "Successfully locked account for user %s due to storage overuse.", user);
+    }
+
     mysql_close(conn);
 }
 
-// Load user limits
-static void load_user_limits() {
-    FILE *fp = fopen("/etc/mysql_search/search_user", "r");
-    if (!fp) {
-        syslog(LOG_ERR, "[AuditPlugin] Failed to open search_user file.");
-        return;
-    }
-    char line[256];
-    pthread_mutex_lock(&limits_mutex);
-    limit_count = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        char name[64], soft_s[32], hard_s[32];
-        if (sscanf(line, "%63s %31s %31s", name, soft_s, hard_s) == 3) {
-            UserLimit ul;
-            strncpy(ul.user, name, sizeof(ul.user));
-            ul.soft_limit = atoll(soft_s);
-            ul.hard_limit = atoll(hard_s);
-            if (limit_count < MAX_USERS) {
-                limits[limit_count++] = ul;
-            }
-        }
-    }
-    pthread_mutex_unlock(&limits_mutex);
-    fclose(fp);
-}
-
-// Load DB password
-static void load_password() {
-    FILE *fp = fopen("/root/etc/mysql_monitor/passwd", "r");
-    if (!fp) {
-        syslog(LOG_ERR, "[AuditPlugin] Failed to open passwd file.");
-        return;
-    }
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        char user[64], pass[128];
-        if (sscanf(line, "%63s %127s", user, pass) == 2) {
-            if (strcmp(user, g_db_user) == 0) {
-                strncpy(g_db_pass, pass, sizeof(g_db_pass));
-                break;
-            }
-        }
-    }
-    fclose(fp);
-}
-
-// Search limits
-static int get_limits(const char *user, long long *soft, long long *hard) {
-    pthread_mutex_lock(&limits_mutex);
-    for (int i = 0; i < limit_count; i++) {
-        if (strcmp(limits[i].user, user) == 0) {
-            *soft = limits[i].soft_limit;
-            *hard = limits[i].hard_limit;
-            pthread_mutex_unlock(&limits_mutex);
-            return 0;
-        }
-    }
-    pthread_mutex_unlock(&limits_mutex);
-    return -1;
-}
-
-// Version check for MariaDB 10.4+
-static bool is_mariadb_104_or_higher(MYSQL *conn) {
-    if (mysql_query(conn, "SELECT VERSION()") != 0) return false;
-    MYSQL_RES *res = mysql_store_result(conn);
-    if (!res) return false;
-    MYSQL_ROW row = mysql_fetch_row(res);
-    bool ret = false;
-    if (row && row[0]) {
-        if (strstr(row[0], "MariaDB")) {
-            int major, minor;
-            if (sscanf(row[0], "%*[^0-9]%d.%d", &major, &minor) == 2) {
-                if (major > 10 || (major == 10 && minor >= 4)) {
-                    ret = true;
+static int audit_notify(MYSQL_AUDIT_INFO *audit_info, unsigned int event_class, const void *event) {
+    if (event_class == MYSQL_AUDIT_GENERAL_CLASS && audit_info->general_info->event == AUDIT_EVENT_QUERY) {
+        const char *query = audit_info->general_info->query;
+        if (query && (strncasecmp(query, "INSERT", 6) == 0 ||
+                      strncasecmp(query, "UPDATE", 6) == 0 ||
+                      strncasecmp(query, "LOAD", 4) == 0)) {
+            const char *user = audit_info->general_info->user;
+            if (user) {
+                char *user_copy = strdup(user);
+                if (user_copy) {
+                    pthread_t new_thread;
+                    pthread_create(&new_thread, NULL, check_user_usage_worker, user_copy);
+                    pthread_detach(new_thread);
                 }
             }
         }
-    }
-    mysql_free_result(res);
-    return ret;
-}
-
-// Lock user if exceeded
-static void lock_user_if_needed(MYSQL *conn, const char *user, long long usage) {
-    long long soft, hard;
-    if (get_limits(user, &soft, &hard) == 0) {
-        if (soft > 0 && usage > soft) {
-            syslog(LOG_WARNING, "[AuditPlugin] User %s exceeded soft limit (%lld).", user, usage);
-        }
-        if (hard > 0 && usage > hard) {
-            bool is_mariadb = strstr(mysql_get_server_info(conn), "MariaDB") != NULL;
-            char sql[256];
-            
-            if (is_mariadb && is_mariadb_104_or_higher(conn)) {
-                snprintf(sql, sizeof(sql), "ALTER USER '%s'@'%%' ACCOUNT LOCK;", user);
-                if (mysql_query(conn, sql) == 0) {
-                    syslog(LOG_INFO, "[AuditPlugin] LOCKED user %s (MariaDB>=10.4, usage=%lld)", user, usage);
-                }
-            } else {
-                // Fallback for MySQL and older MariaDB
-                snprintf(sql, sizeof(sql), "UPDATE mysql.user SET account_locked='Y' WHERE user='%s';", user);
-                char sql2[64];
-                snprintf(sql2, sizeof(sql2), "FLUSH PRIVILEGES;");
-                if (mysql_query(conn, sql) == 0 && mysql_query(conn, sql2) == 0) {
-                    syslog(LOG_INFO, "[AuditPlugin] LOCKED user %s (older version, usage=%lld)", user, usage);
-                }
-            }
-        }
-    }
-}
-
-// Check usage
-static void check_user_usage(const char *user) {
-    MYSQL *conn = get_connection();
-    if (!conn) return;
-
-    char grantee_user[64];
-    char grantee_host[64];
-    const char *at_sign = strchr(user, '@');
-    if (at_sign) {
-        strncpy(grantee_user, user, at_sign - user);
-        grantee_user[at_sign - user] = '\0';
-        strcpy(grantee_host, at_sign + 1);
-    } else {
-        strcpy(grantee_user, user);
-        strcpy(grantee_host, "localhost");
-    }
-
-    char sql[768];
-    snprintf(sql, sizeof(sql),
-        "SELECT SUM(DATA_LENGTH+INDEX_LENGTH) "
-        "FROM information_schema.tables "
-        "WHERE TABLE_SCHEMA IN ("
-        "  SELECT DISTINCT table_schema "
-        "  FROM information_schema.schema_privileges "
-        "  WHERE GRANTEE IN ('%s@%s', '%s@%%') "
-        ");",
-        grantee_user, grantee_host, grantee_user);
-
-    if (mysql_query(conn, sql) == 0) {
-        MYSQL_RES *res = mysql_store_result(conn);
-        if (res) {
-            MYSQL_ROW row = mysql_fetch_row(res);
-            if (row && row[0]) {
-                long long usage = atoll(row[0]);
-                lock_user_if_needed(conn, user, usage);
-            }
-            mysql_free_result(res);
-        }
-    } else {
-        syslog(LOG_ERR, "[AuditPlugin] SQL error while checking user %s: %s",
-               user, mysql_error(conn));
-    }
-    
-    release_connection(conn);
-}
-
-// Audit notify
-static int audit_notify(MYSQL_THD thd, unsigned int event_class, const void *event) {
-    if (event_class == MYSQL_AUDIT_GENERAL_CLASS) {
-        const struct mysql_event_general *ev = (const struct mysql_event_general *)event;
-        const char *user = ev->user;
-        const char *cmd  = ev->general_query;
-        if (!user || !cmd) return 0;
-        if (strncasecmp(cmd, "INSERT ", 7) == 0 ||
-            strncasecmp(cmd, "UPDATE ", 7) == 0 ||
-            strncasecmp(cmd, "LOAD ",   5) == 0) {
-            check_user_usage(user);
-        }
-    } else if (event_class == MYSQL_AUDIT_DDL_COMMAND_CLASS) {
+    } else if (event_class == MYSQL_AUDIT_DDL_CLASS) {
         const struct mysql_event_ddl *ev = (const struct mysql_event_ddl *)event;
         const char *user = ev->user;
         const char *cmd  = ev->ddl_query;
         if (!user || !cmd) return 0;
-        check_user_usage(user);
+        char *user_copy = strdup(user);
+        if (user_copy) {
+            pthread_t new_thread;
+            pthread_create(&new_thread, NULL, check_user_usage_worker, user_copy);
+            pthread_detach(new_thread);
+        }
     }
     return 0;
 }
@@ -268,19 +281,39 @@ static struct st_mysql_audit audit_interface = {
     MYSQL_AUDIT_INTERFACE_VERSION,
     NULL,
     audit_notify,
-    { 1, 0, 0, 1, 1, 0, 0, 0 } // connection + general + ddl
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL
 };
 
-mysql_declare_plugin(mysql_monitor_audit) {
-    MYSQL_AUDIT_PLUGIN,
-    &audit_interface,
-    "mysql_monitor_audit",
-    "YourName",
-    "Audit + Capacity Monitor Integration (MySQL/MariaDB)",
-    PLUGIN_LICENSE_GPL,
-    load_user_limits,   /* Init */
-    NULL,               /* Deinit */
-    0x0100,
-    NULL, NULL, NULL,
+// Plugin init function
+static int plugin_init(void) {
+    if (read_config() != 0) {
+        syslog(LOG_WARNING, "Using default DB connection settings (host=%s, port=%u)", g_db_hostname, g_db_port);
+    }
+    if (read_db_pass() != 0 || read_user_limits() != 0) {
+        syslog(LOG_ERR, "Failed to load initial configuration. Plugin will not function properly.");
+        return 1;
+    }
+    syslog(LOG_INFO, "MySQL Monitor Audit Plugin initialized.");
+    return 0;
 }
-mysql_declare_plugin_end;
+
+// Plugin deinit function
+static int plugin_deinit(void) {
+    syslog(LOG_INFO, "MySQL Monitor Audit Plugin de-initialized.");
+    return 0;
+}
+
+// Plugin descriptor
+struct st_mysql_daemon plugin_descriptor = {
+    MYSQL_DAEMON_INTERFACE_VERSION,
+    plugin_init,
+    plugin_deinit,
+    "mysql_monitor_audit",
+    "J. Doe",
+    "MySQL/MariaDB Audit Plugin to lock accounts on storage overuse",
+    { 0, 2, 0 }
+};
