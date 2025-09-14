@@ -72,6 +72,10 @@ hostname username password database port interval query_method
 127.0.0.1 monitor_user example_pass mysql 3306 60 information_schema
 192.168.1.10 monitor_user another_pass mysql 3306 120 sys_schema
 ```
+```bash
+chmod 600 /etc/mysql_monitor/db_config
+chown root:root /etc/mysql_monitor/db_config
+```
 
 ### `/etc/mysql_monitor/user_limits`
 ```
@@ -83,6 +87,9 @@ testuser 0 3000000000
 ```
 
 ### `/root/etc/mysql_monitor/passwd`
+example_pass
+
+### `/root/etc/mysql_monitor/passwd2`
 example_pass
 
 ### `/etc/storage_guard.conf`
