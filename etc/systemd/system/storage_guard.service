@@ -1,0 +1,31 @@
+# /etc/systemd/system/storage_guard.service
+[Unit]
+Description=Storage Guard Daemon for MySQL/MariaDB Quota Enforcement
+After=network.target mysqld.service mariadb.service
+Requires=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/storage_guard --foreground
+# Run as non-root user/group if configured in storage_guard.conf
+User=storageguard
+Group=storageguard
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Limit resource usage (optional hardening)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+MemoryDenyWriteExecute=yes
+
+# Logging
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=storage_guard
+
+[Install]
+WantedBy=multi-user.target
