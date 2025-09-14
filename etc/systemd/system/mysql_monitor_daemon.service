@@ -1,0 +1,29 @@
+[Unit]
+Description=MySQL/MariaDB Storage Monitor Daemon
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/mysql_monitor_daemon
+Restart=always
+RestartSec=5
+
+# セキュリティ強化（推奨）
+User=mysqlmon
+Group=mysqlmon
+WorkingDirectory=/var/run/mysql_monitor
+RuntimeDirectory=mysql_monitor
+RuntimeDirectoryMode=0750
+
+# 権限と保護
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/run/mysql_monitor /etc/mysql_monitor /root/etc/mysql_monitor
+
+# ログは syslog/journal に出力される
+SyslogIdentifier=mysql_monitor_daemon
+
+[Install]
+WantedBy=multi-user.target
