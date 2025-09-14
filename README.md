@@ -120,21 +120,55 @@ User limits can also be kept in a separate file defined by user_limits_file.
 
 ### Build Audit Plugin
 ```bash
-gcc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c \
-    $(mysql_config --cflags) $(mysql_config --libs) -lpthread
+RHEL
+gcc -O2 -Wall -o mysql_monitor_audit mysql_monitor_audit.c \
+    -lmysqlclient -lpthread
+
+Debian/Ubuntu
+sudo apt-get install build-essential libmysqlclient-dev
+gcc -O2 -Wall -o mysql_monitor_audit mysql_monitor_audit.c \
+    -lmysqlclient -lpthread
+
+BSD
+pkg install mysql80-client
+cc -O2 -Wall -pthread -o mysql_monitor_audit mysql_monitor_audit.c \
+   -lmysqlclient
 ```
 
 ### Build Daemon
 ```bash
-gcc -o mysql_monitor_daemon mysql_monitor_daemon.c \
-    $(mysql_config --cflags) $(mysql_config --libs) -lpthread
+RHEL
+sudo yum install gcc mysql-devel
+gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c \
+    -lmysqlclient -lpthread
+
+Debian/Ubuntu
+sudo apt-get install build-essential libmysqlclient-dev
+gcc -O2 -Wall -o mysql_monitor_daemon mysql_monitor_daemon.c \
+    -lmysqlclient -lpthread
+
+BSD
+pkg install mysql80-client
+cc -O2 -Wall -pthread -o mysql_monitor_daemon mysql_monitor_daemon.c \
+   -lmysqlclient
 ```
 
 ### Build Last Daemon
 ```bash
-gcc -o storage_guard storage_guard.c -lmysqlclient -lpthread
-or bsd
-gcc -o storage_guard storage_guard.c -lmysqlclient -lutil -lpthread
+RHEL
+sudo yum install gcc mysql-devel
+gcc -O2 -Wall -o storage_guard storage_guard.c \
+    -lmysqlclient -lpthread
+
+Debian/Ubuntu
+sudo apt-get install build-essential libmysqlclient-dev
+gcc -O2 -Wall -o storage_guard storage_guard.c \
+    -lmysqlclient -lpthread
+
+BSD
+pkg install mysql80-client
+cc -O2 -Wall -o storage_guard storage_guard.c \
+   -lmysqlclient -lutil -lpthread
 ```
 
 ### Systemd Service Example
