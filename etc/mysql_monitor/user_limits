@@ -1,0 +1,4 @@
+# user_name   soft_limit_bytes   hard_limit_bytes
+alice         1000000000         2000000000
+bob           5000000000         8000000000
+testuser      0                  3000000000
