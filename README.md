@@ -19,6 +19,7 @@ Designed for shared servers, internal DB clusters, and hosting environments wher
 ```
 /etc/mysql_search/
 ├── db_list
+├── search.conf
 └── user_limits # User limits list: user,soft,hard
 ```
 
@@ -55,7 +56,7 @@ touch /etc/mysql_monitor/config
 # Force Permissions (Very Important)
 chmod 600 /etc/mysql_monitor/search.conf
 chmod 600 /root/mysql_monitor/passwd
-chmod 644 /etc/mysql_monitor/search_user
+chmod 644 /etc/mysql_monitor/user_limits
 chmod 640 /etc/mysql_monitor/db_list
 chown root:wheel /etc/mysql_monitor/db_list   # FreeBSD
 ```
@@ -97,6 +98,29 @@ Build (MySQL development headers required)
 ```
 gcc -o mysql_monitor_daemon mysql_monitor_daemon.c $(mysql_config --cflags) $(mysql_config --libs) -lrt
 gcc -fPIC -shared -o mysql_monitor_audit.so mysql_monitor_audit.c $(mysql_config --cflags) $(mysql_config --libs) -lpthread
+or
+gcc -fPIC -shared \
+    -o mysql_monitor_audit.so mysql_monitor_audit.c \
+    $(mariadb_config --cflags) \
+    $(mariadb_config --libs) \
+    -lpthread
+
+cp mysql_monitor_audit.so $(mysql_config --plugindir)/
+
+and MariaDB for BSD
+cc -fPIC -shared \
+    -o mysql_monitor_audit.so mysql_monitor_audit.c \
+    $(mariadb_config --cflags) \
+    $(mariadb_config --libs) \
+    -pthread
+Linux
+gcc -fPIC -shared \
+    -o mysql_monitor_audit.so mysql_monitor_audit.c \
+    $(mariadb_config --cflags) \
+    $(mariadb_config --libs) \
+    -lpthread
+
+
 ```
 
 ```BSD
@@ -140,6 +164,10 @@ INSTALL PLUGIN mysql_monitor_audit SONAME ‘mysql_monitor_audit.so’;
 SHOW PLUGINS LIKE ‘mysql_monitor_audit’;
 
 Create MySQL user
+
+vi my.cnf
+[mysqld]
+plugin-load-add=mysql_monitor_audit.so
 ```
 
 ```
