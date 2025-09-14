@@ -1,0 +1,3 @@
+# hostname   username     password      database   port   interval   query_method
+127.0.0.1    monitor_user example_pass  mysql      3306   60         information_schema
+192.168.1.10 monitor_user another_pass  mysql      3306   120        sys_schema
