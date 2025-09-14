@@ -89,9 +89,6 @@ testuser 0 3000000000
 ### `/root/etc/mysql_monitor/passwd`
 example_pass
 
-### `/root/etc/mysql_monitor/passwd2`
-example_pass
-
 ### `/etc/storage_guard.conf`
 ```bash
 [general]
