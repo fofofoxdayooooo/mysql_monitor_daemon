@@ -1,0 +1,4 @@
+# user,soft_limit_bytes,hard_limit_bytes
+user1,500000000,1000000000
+user2,2000000000,2500000000
+analytics,5000000000,6000000000
